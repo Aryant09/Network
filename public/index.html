@@ -1,0 +1,145 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Web Port Scanner</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #0b1020; color: #e6e9ef; }
+      h1 { margin-top: 0; }
+      .card { background: #121a33; border: 1px solid #22315f; border-radius: 12px; padding: 16px; max-width: 960px; margin: 0 auto; }
+      label { display: block; margin-top: 12px; font-weight: 600; }
+      input, button { padding: 10px 12px; border-radius: 8px; border: 1px solid #22315f; background: #0f1530; color: #e6e9ef; }
+      input { width: 100%; }
+      button { cursor: pointer; font-weight: 600; }
+      button.primary { background: #4361ee; border-color: #4361ee; }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .log { margin-top: 16px; max-height: 380px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 13px; background: #0f1530; border: 1px solid #22315f; border-radius: 8px; padding: 12px; }
+      .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+      .open { background: #16a34a33; color: #16a34a; border: 1px solid #16a34a77; }
+      .closed { background: #ef444433; color: #ef4444; border: 1px solid #ef444477; }
+      .filtered { background: #eab30833; color: #eab308; border: 1px solid #eab30877; }
+      .summary { margin-top: 16px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+      .muted { color: #9aa5b1; }
+      a { color: #93c5fd; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Web Port Scanner</h1>
+      <p class="muted">Enter a hostname, IPv4 address, or IPv4 CIDR (e.g., <code>192.168.1.0/24</code>). Ports can be a list and ranges like <code>80,443,1-1024</code>.</p>
+      <div>
+        <label>Target</label>
+        <input id="target" placeholder="example.com or 192.168.1.1 or 10.0.0.0/24" />
+      </div>
+      <div class="row">
+        <div>
+          <label>Ports</label>
+          <input id="ports" placeholder="80,443,1-1024" />
+        </div>
+        <div>
+          <label>Timeout (ms)</label>
+          <input id="timeout" type="number" value="1000" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 12px;">
+        <div>
+          <label>Concurrency</label>
+          <input id="concurrency" type="number" value="200" />
+        </div>
+        <div style="display:flex; align-items:end; gap:8px;">
+          <button id="scan" class="primary">Scan</button>
+          <button id="stream">Stream</button>
+        </div>
+      </div>
+
+      <div class="summary" id="summary"></div>
+      <div class="log" id="log"></div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const logEl = $("log");
+      const summaryEl = $("summary");
+
+      function append(line) {
+        const div = document.createElement('div');
+        div.innerHTML = line;
+        logEl.appendChild(div);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function tag(status) {
+        return `<span class="tag ${status}">${status}</span>`;
+      }
+
+      function params() {
+        return {
+          target: $("target").value.trim(),
+          ports: $("ports").value.trim(),
+          timeoutMs: Number($("timeout").value),
+          concurrency: Number($("concurrency").value),
+        };
+      }
+
+      async function doScan() {
+        logEl.innerHTML = "";
+        summaryEl.innerHTML = "";
+        const body = params();
+        $("scan").disabled = true;
+        try {
+          const res = await fetch('/api/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const json = await res.json();
+          if (!res.ok) throw new Error(json.error || 'Request failed');
+          const open = json.results.filter(r => r.status === 'open').length;
+          summaryEl.innerHTML = `<div class="grid"><div><b>Hosts</b><div class="muted">${json.hosts.length}</div></div><div><b>Ports</b><div class="muted">${json.ports.length}</div></div><div><b>Open</b><div class="muted">${open}</div></div></div>`;
+          for (const r of json.results) {
+            append(`<span class="muted">${r.host}:${r.port}</span> ${tag(r.status)} <span class="muted">${r.latencyMs ? r.latencyMs + 'ms' : ''} ${r.error || ''}</span>`);
+          }
+        } catch (e) {
+          append(`<span class="closed">${e.message}</span>`);
+        } finally {
+          $("scan").disabled = false;
+        }
+      }
+
+      function doStream() {
+        logEl.innerHTML = "";
+        summaryEl.innerHTML = "";
+        const p = params();
+        const url = new URL('/api/scan/stream', location.origin);
+        url.searchParams.set('target', p.target);
+        if (p.ports) url.searchParams.set('ports', p.ports);
+        url.searchParams.set('timeoutMs', String(p.timeoutMs));
+        url.searchParams.set('concurrency', String(p.concurrency));
+
+        const es = new EventSource(url.toString());
+        let total = 0, completed = 0, open = 0;
+        es.addEventListener('start', (ev) => {
+          const data = JSON.parse(ev.data);
+          total = data.total;
+          summaryEl.innerHTML = `<div class="grid"><div><b>Total tasks</b><div class="muted">${total}</div></div><div><b>Completed</b><div class="muted" id="c">0</div></div><div><b>Open</b><div class="muted" id="o">0</div></div></div>`;
+        });
+        es.addEventListener('progress', (ev) => {
+          const { result, completed: c } = JSON.parse(ev.data);
+          completed = c;
+          if (result.status === 'open') open++;
+          $("c").textContent = String(completed);
+          $("o").textContent = String(open);
+          append(`<span class="muted">${result.host}:${result.port}</span> ${tag(result.status)} <span class="muted">${result.latencyMs ? result.latencyMs + 'ms' : ''} ${result.error || ''}</span>`);
+          if (completed >= total) es.close();
+        });
+        es.addEventListener('done', () => es.close());
+        es.addEventListener('error', (ev) => {
+          try { append(`<span class=closed>${JSON.parse(ev.data).message}</span>`); } catch { append('<span class=closed>Stream error</span>'); }
+          es.close();
+        });
+      }
+
+      $("scan").addEventListener('click', doScan);
+      $("stream").addEventListener('click', doStream);
+    </script>
+  </body>
+</html>
